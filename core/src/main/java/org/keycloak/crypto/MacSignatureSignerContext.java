@@ -32,6 +32,11 @@ public class MacSignatureSignerContext implements SignatureSignerContext {
     }
 
     @Override
+    public String getX509CertificateSha1Thumbprint() {
+        return null;
+    }
+
+    @Override
     public String getAlgorithm() {
         return key.getAlgorithmOrDefault();
     }

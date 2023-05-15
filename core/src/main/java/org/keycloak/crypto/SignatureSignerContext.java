@@ -20,6 +20,8 @@ public interface SignatureSignerContext {
 
     String getKid();
 
+    String getX509CertificateSha1Thumbprint();
+
     String getAlgorithm();
 
     String getHashAlgorithm();
