@@ -32,12 +32,18 @@ import org.keycloak.common.util.Base64Url;
 import org.keycloak.common.util.SecretGenerator;
 import org.keycloak.common.util.Time;
 import org.keycloak.connections.httpclient.HttpClientProvider;
+import org.keycloak.crypto.KeyType;
+import org.keycloak.crypto.KeyUse;
 import org.keycloak.crypto.KeyWrapper;
 import org.keycloak.crypto.SignatureProvider;
+import org.keycloak.crypto.SignatureSignerContext;
 import org.keycloak.events.Details;
 import org.keycloak.events.Errors;
 import org.keycloak.events.EventBuilder;
 import org.keycloak.events.EventType;
+import org.keycloak.jose.jwk.JWKBuilder;
+import org.keycloak.jose.jwk.RSAPublicJWK;
+import org.keycloak.jose.jws.JWSBuilder;
 import org.keycloak.jose.jws.JWSInput;
 import org.keycloak.jose.jws.JWSInputException;
 import org.keycloak.keys.loader.PublicKeyStorageManager;
@@ -74,6 +80,10 @@ import jakarta.ws.rs.core.UriInfo;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.security.cert.X509Certificate;
+import java.util.Collections;
+import java.util.List;
+import java.util.Optional;
 
 import static org.keycloak.utils.LockObjectsForModification.lockUserSessionsForModification;
 
@@ -309,6 +319,43 @@ public class OIDCIdentityProvider extends AbstractOAuth2IdentityProvider<OIDCIde
             return Response.ok(newResponse).type(MediaType.APPLICATION_JSON_TYPE).build();
         } catch (IOException e) {
             throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public SimpleHttp authenticateTokenRequest(SimpleHttp tokenRequest) {
+
+        if (getConfig().isJWTAuthentication()) {
+            String sha1x509Thumbprint = null;
+            SignatureSignerContext signer = getSignatureContext();
+            if (getConfig().getClientAuthMethod().equals(OIDCLoginProtocol.PRIVATE_KEY_JWT)) {
+                KeyWrapper key = session.keys().getKey(session.getContext().getRealm(), signer.getKid(), KeyUse.SIG, signer.getAlgorithm());
+                if (key != null
+                        && key.getStatus().isEnabled()
+                        && key.getPublicKey() != null
+                        && key.getUse().equals(KeyUse.SIG)
+                        && key.getType().equals(KeyType.RSA)) {
+                    JWKBuilder builder = JWKBuilder.create().kid(key.getKid()).algorithm(key.getAlgorithmOrDefault());
+                    List<X509Certificate> certificates = Optional.ofNullable(key.getCertificateChain())
+                            .filter(certs -> !certs.isEmpty())
+                            .orElseGet(() -> Collections.singletonList(key.getCertificate()));
+                    RSAPublicJWK jwk = (RSAPublicJWK) builder.rsa(key.getPublicKey(), certificates, key.getUse());
+                    sha1x509Thumbprint = jwk.getSha1x509Thumbprint();
+                }
+            }
+            String jws = new JWSBuilder().type(OAuth2Constants.JWT).x5t(sha1x509Thumbprint).jsonContent(generateToken()).sign(getSignatureContext());
+            return tokenRequest
+                    .param(OAuth2Constants.CLIENT_ASSERTION_TYPE, OAuth2Constants.CLIENT_ASSERTION_TYPE_JWT)
+                    .param(OAuth2Constants.CLIENT_ASSERTION, jws);
+        } else {
+            try (VaultStringSecret vaultStringSecret = session.vault().getStringSecret(getConfig().getClientSecret())) {
+                if (getConfig().isBasicAuthentication()) {
+                    return tokenRequest.authBasic(getConfig().getClientId(), vaultStringSecret.get().orElse(getConfig().getClientSecret()));
+                }
+                return tokenRequest
+                        .param(OAUTH2_PARAMETER_CLIENT_ID, getConfig().getClientId())
+                        .param(OAUTH2_PARAMETER_CLIENT_SECRET, vaultStringSecret.get().orElse(getConfig().getClientSecret()));
+            }
         }
     }
 
